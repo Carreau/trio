@@ -465,7 +465,7 @@ class Task:
     # tasks start out unscheduled, and unscheduled tasks have None here
     _next_send = attr.ib(default=None)
     _abort_func = attr.ib(default=None)
-    _unawaited_coro = attr.ib(default=False)
+    _unawaited_coro = attr.ib(default=None)
 
     # Task-local values, see _local.py
     _locals = attr.ib(default=attr.Factory(dict))
@@ -1382,10 +1382,12 @@ def run_impl(runner, async_fn, args):
                     or user the `allow_noawait`/`ensure_await` contextmanagers.
                     '''[1:]))
                     )
-                msg = task.coro.send(next_send)
-                unawaited_coro = protector.check()
-                if unawaited_coro:
-                   task._unawaited_coro = unawaited_coro
+                    task._unawaited_coro = None
+                else:
+                    msg = task.coro.send(next_send)
+                    unawaited_coro = protector.check()
+                    if unawaited_coro:
+                       task._unawaited_coro = unawaited_coro
             except StopIteration as stop_iteration:
                 final_result = Value(stop_iteration.value)
             except BaseException as task_exc:

@@ -3,7 +3,7 @@ import attr
 # Re-exported
 __all__ = [
     "TrioInternalError", "RunFinishedError", "WouldBlock",
-    "Cancelled", "PartialResult",
+    "Cancelled", "PartialResult", "NonAwaitedCoroutine"
 ]
 
 class TrioInternalError(Exception):
