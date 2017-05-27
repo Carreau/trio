@@ -152,18 +152,12 @@ class CoroProtect:
         """
         check that since last invocation no coroutine has been left unawaited.
 
-        Return an unawaited coroutine if one has been found.
+        Return a list of unawaited coroutines since last call to this function.
         """
-        while self._pending_test:
-            coro = self._pending_test.pop()
-            if inspect.getcoroutinestate(coro) == 'CORO_CREATED':
-                return coro
-                #print(f'Coroutine {coro} was not awaited.')
-                #if error:
-                #    coro.throw(ValueError(f'Coroutine {coro} was not awaited.'))
-                #else :
-                #    print(RuntimeError(f'Coroutine {coro} was not awaited.'))
-        return None
+        pending = self._pending_test
+        state = inspect.getcoroutinestate
+        self._pending_test = set()
+        return [coro for coro in pending if state(coro) == 'CORO_CREATED']
 
 protector = CoroProtect()
 
@@ -465,7 +459,7 @@ class Task:
     # tasks start out unscheduled, and unscheduled tasks have None here
     _next_send = attr.ib(default=None)
     _abort_func = attr.ib(default=None)
-    _unawaited_coro = attr.ib(default=None)
+    _unawaited_coros = attr.ib(default=None)
 
     # Task-local values, see _local.py
     _locals = attr.ib(default=attr.Factory(dict))
@@ -1369,10 +1363,22 @@ def run_impl(runner, async_fn, args):
                 #   https://bugs.python.org/issue29590
                 # So now we send in the Result object and unwrap it on the
                 # other side.
-                if task._unawaited_coro:
+                import tracemalloc
+                if task._unawaited_coros:
+                    err =[]
+                    for coro in task._unawaited_coros:
+                        tb = tracemalloc.get_object_traceback(coro)
+                        if tb:
+                            err.append(f' - {coro} ({tb})')
+                        else:
+                            err.append(f' - {coro}')
+                            
+                    err = '\n'.join(err)
                     task.coro.throw(NonAwaitedCoroutine(textwrap.dedent(
-                    f'''
-                    Coroutine {task._unawaited_coro} was not awaited.
+                    '''
+                    One or more coroutines where not awaited:
+
+                    {err}
                                       
                     Trio has detected that at least a coroutine has not been between awaited
                     between this checkpoint point and previous one. This is may be due
@@ -1380,14 +1386,15 @@ def run_impl(runner, async_fn, args):
 
                     If you need to create non-awaited coroutines wrap them in `await_later`,
                     or user the `allow_noawait`/`ensure_await` contextmanagers.
-                    '''[1:]))
+
+                    '''[1:]).format(err=err))
                     )
-                    task._unawaited_coro = None
+                    task._unawaited_coros = None
                 else:
                     msg = task.coro.send(next_send)
-                    unawaited_coro = protector.check()
-                    if unawaited_coro:
-                       task._unawaited_coro = unawaited_coro
+                    unawaited_coros = protector.check()
+                    if unawaited_coros:
+                        task._unawaited_coros = unawaited_coros
             except StopIteration as stop_iteration:
                 final_result = Value(stop_iteration.value)
             except BaseException as task_exc:
