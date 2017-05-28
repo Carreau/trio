@@ -1213,7 +1213,6 @@ def run(async_fn, *args, clock=None, instruments=[],
           propagates it.
 
     """
-
     # Do error-checking up front, before we enter the TrioInternalError
     # try/catch
     #
@@ -1369,10 +1368,9 @@ def run_impl(runner, async_fn, args):
                     for coro in task._unawaited_coros:
                         tb = tracemalloc.get_object_traceback(coro)
                         if tb:
-                            err.append(f' - {coro} ({tb})')
+                            err.append(' - {coro} ({tb})'.format(coro=coro, tb=tb))
                         else:
-                            err.append(f' - {coro}')
-                            
+                            err.append(' - {coro}'.format(coro=coro))
                     err = '\n'.join(err)
                     task.coro.throw(NonAwaitedCoroutine(textwrap.dedent(
                     '''
