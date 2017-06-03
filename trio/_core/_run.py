@@ -10,7 +10,7 @@ import select
 import sys
 from math import inf
 import functools
-
+import tracemalloc
 import textwrap
 
 import attr
@@ -123,6 +123,27 @@ class CoroProtect:
         state = inspect.getcoroutinestate
         self._pending_test = set()
         return [coro for coro in pending if state(coro) == 'CORO_CREATED']
+
+def _non_awaited_error(coros):
+    err =[]
+    for coro in coros:
+        tb = tracemalloc.get_object_traceback(coro)
+        if tb:
+            err.append(' - {coro} ({tb})'.format(coro=coro, tb=tb))
+        else:
+            err.append(' - {coro}'.format(coro=coro))
+    err = '\n'.join(err)
+    return NonAwaitedCoroutine(textwrap.dedent(
+        '''
+        One or more coroutines where not awaited:
+
+        {err}
+                            
+        Trio has detected that at least a coroutine has not been between awaited
+        between this checkpoint point and previous one. This is may be due
+        to a missing `await` 
+
+        '''[1:]).format(err=err), coroutines=coros)
 
 protector = CoroProtect()
 
@@ -407,7 +428,7 @@ class Nursery:
                     raise mexc
 
     def __del__(self):
-        assert not self.children and not self.zombies
+        assert not self.children and not self.zombies, "Children: {} and Zombies : {}".format(self.children, self.zombies)
 
 
 ################################################################
@@ -1327,36 +1348,21 @@ def run_impl(runner, async_fn, args):
                 #   https://bugs.python.org/issue29590
                 # So now we send in the Result object and unwrap it on the
                 # other side.
-                import tracemalloc
                 if task._unawaited_coros:
-                    err =[]
-                    for coro in task._unawaited_coros:
-                        tb = tracemalloc.get_object_traceback(coro)
-                        if tb:
-                            err.append(' - {coro} ({tb})'.format(coro=coro, tb=tb))
-                        else:
-                            err.append(' - {coro}'.format(coro=coro))
-                    err = '\n'.join(err)
-                    task.coro.throw(NonAwaitedCoroutine(textwrap.dedent(
-                    '''
-                    One or more coroutines where not awaited:
-
-                    {err}
-                                      
-                    Trio has detected that at least a coroutine has not been between awaited
-                    between this checkpoint point and previous one. This is may be due
-                    to a missing `await` 
-
-                    '''[1:]).format(err=err))
-                    )
+                    unawaited = task._unawaited_coros
                     task._unawaited_coros = None
+                    task.coro.throw(_non_awaited_error(unawaited))
                 else:
                     msg = task.coro.send(next_send)
                     unawaited_coros = protector.check()
                     if unawaited_coros:
                         task._unawaited_coros = unawaited_coros
             except StopIteration as stop_iteration:
-                final_result = Value(stop_iteration.value)
+                unawaited_coros = protector.check()
+                if unawaited_coros:
+                    final_result = Error(_non_awaited_error(unawaited_coros))
+                else:
+                    final_result = Value(stop_iteration.value)
             except BaseException as task_exc:
                 final_result = Error(task_exc)
 

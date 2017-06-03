@@ -1,4 +1,5 @@
 import attr
+from weakref import WeakSet
 
 # Re-exported
 __all__ = [
@@ -35,7 +36,11 @@ RunFinishedError.__module__ = "trio"
 class NonAwaitedCoroutine(RuntimeError):
     """Raised by blocking calls if a non-awaited coroutine detected in current task
     """
-    pass
+
+    def __init__(self, *args, coroutines=None, **kwargs):
+        #self.coroutines = WeakSet(coroutines)
+        self.coroutines = set(coroutines)
+        super().__init__(*args, **kwargs)
 
 NonAwaitedCoroutine.__module__ = "trio"
 
