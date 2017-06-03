@@ -92,24 +92,6 @@ class CoroProtect:
         self._pending_test = set()
         self._protecting = True
 
-    @contextmanager
-    def ensure_await(self):
-        """
-        Context Manager to ensure all coroutines are awaited.
-
-        Ensure that any coroutine created within this context
-        manager is awaited. The context manager throw in the
-        coroutine  if it is not awaited on context manager exit.
-        """
-        p = self._protecting
-        self._protecting = True
-        try:
-            yield
-            self.check()
-        finally:
-            self._protecting = p
-
-
     def coro_wrapper(self, coro):
         """
         Coroutine wrapper to track creation of coroutines.
@@ -124,23 +106,6 @@ class CoroProtect:
         """
         self._pending_test.discard(coro)
         return coro
-
-    @contextmanager
-    def allow_noawait(self):
-        """
-        Context Manager to allow coroutines to not be awaited.
-
-        By default in trio all created coroutines need to be awaited before the
-        next stop into the scheduler, this relaxes the constraint when inside
-        this context manager.
-        """
-
-        p = self._protecting
-        self._protecting = False
-        try:
-            yield
-        finally:
-            self._protecting = p
 
     def install(self):
         """install a coroutine wrapper to track created coroutines.
@@ -1381,9 +1346,6 @@ def run_impl(runner, async_fn, args):
                     Trio has detected that at least a coroutine has not been between awaited
                     between this checkpoint point and previous one. This is may be due
                     to a missing `await` 
-
-                    If you need to create non-awaited coroutines wrap them in `await_later`,
-                    or user the `allow_noawait`/`ensure_await` contextmanagers.
 
                     '''[1:]).format(err=err))
                     )
