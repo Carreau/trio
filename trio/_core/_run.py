@@ -13,6 +13,8 @@ import functools
 import tracemalloc
 import textwrap
 
+from there import print
+
 import attr
 from sortedcontainers import SortedDict
 from async_generator import async_generator, yield_
@@ -216,6 +218,7 @@ class CancelScope:
     @enable_ki_protection
     def cancel(self):
         for task in self._cancel_no_notify():
+            # print('Ki delivering cancel')
             task._attempt_delivery_of_any_pending_cancel()
 
     def _add_task(self, task):
@@ -445,7 +448,7 @@ class Task:
     # tasks start out unscheduled, and unscheduled tasks have None here
     _next_send = attr.ib(default=None)
     _abort_func = attr.ib(default=None)
-    _unawaited_coros = attr.ib(default=None)
+    _unawaited_coros = attr.ib(default=attr.Factory(list))
 
     # Task-local values, see _local.py
     _locals = attr.ib(default=attr.Factory(dict))
@@ -545,6 +548,9 @@ class Task:
                 pending_scope = scope
         return pending_scope
 
+    def add_unawaited_coroutines(self, coroutines):
+        self._unawaited_coros.extend(coroutines)
+
     def _attempt_abort(self, raise_cancel):
         # Either the abort succeeds, in which case we will reschedule the
         # task, or else it fails, in which case it will worry about
@@ -557,18 +563,40 @@ class Task:
         # whether we succeeded or failed.
         self._abort_func = None
         if success is Abort.SUCCEEDED:
+            # print('Attempt abort of', self, 'with', raise_cancel)
             self._runner.reschedule(self, Result.capture(raise_cancel))
+
+    # def _attempt_delivery_of_unawaited_coro(self):
+    #     if self._abort_func is None:
+    #         print('   Coro no abort fun')
+    #         return
+    #     if not self._unawaited_coros:
+    #         print('   No unawaited coro')
+    #         return
+    #     def raise_unawaited():
+    #         raise NonAwaitedCoroutine('...', coroutines=self._unawaited_coros)
+    #     self._attempt_abort(raise_unawaited)
+
 
     def _attempt_delivery_of_any_pending_cancel(self):
         if self._abort_func is None:
+            # print('   Cancel no abort fun')
             return
         pending_scope = self._pending_cancel_scope()
-        if pending_scope is None:
+        if self._unawaited_coros:
+            def raise_unawaited():
+                raise NonAwaitedCoroutine('...', coroutines=self._unawaited_coros)
+            raise_fn =  raise_unawaited
+        elif pending_scope:
+            exc = pending_scope._make_exc(self)
+            def raise_cancel():
+                raise exc
+                return
+            raise_fn = raise_cancel
+        else:
             return
-        exc = pending_scope._make_exc(self)
-        def raise_cancel():
-            raise exc
-        self._attempt_abort(raise_cancel)
+        # print('   Cancel/Coro attempt Abort')
+        self._attempt_abort(raise_fn)
 
     def _attempt_delivery_of_pending_ki(self):
         assert self._runner.ki_pending
@@ -701,10 +729,12 @@ class Runner:
             from :func:`yield_indefinitely`.
 
         """
+        # print('Reschedule', task, 'with', next_send)
         assert task._runner is self
         assert task._next_send is None
         task._next_send = next_send
         task._abort_func = None
+        assert task not in self.runq
         self.runq.append(task)
         self.instrument("task_scheduled", task)
 
@@ -751,8 +781,14 @@ class Runner:
         self.reschedule(task, None)
         return task
 
-    def task_exited(self, task, result):
-        task.result = result
+    def task_exited(self, task, result, stop_iteration=None):
+        if task._unawaited_coros:
+            try:
+                raise _non_awaited_error(task._unawaited_coros) from stop_iteration
+            except NonAwaitedCoroutine as e:
+                task.result = Error(e)
+        else:
+            task.result = result
         while task._cancel_stack:
             task._cancel_stack[-1]._remove_task(task)
         self.tasks.remove(task)
@@ -1340,6 +1376,7 @@ def run_impl(runner, async_fn, args):
             next_send = task._next_send
             task._next_send = None
             final_result = None
+            _stop_it = None
             try:
                 # We used to unwrap the Result object here and send/throw its
                 # contents in directly, but it turns out that .throw() is
@@ -1348,29 +1385,20 @@ def run_impl(runner, async_fn, args):
                 #   https://bugs.python.org/issue29590
                 # So now we send in the Result object and unwrap it on the
                 # other side.
-                if task._unawaited_coros:
-                    unawaited = task._unawaited_coros
-                    task._unawaited_coros = None
-                    task.coro.throw(_non_awaited_error(unawaited))
-                else:
-                    msg = task.coro.send(next_send)
-                    unawaited_coros = protector.check()
-                    if unawaited_coros:
-                        task._unawaited_coros = unawaited_coros
+                msg = task.coro.send(next_send)
             except StopIteration as stop_iteration:
-                unawaited_coros = protector.check()
-                if unawaited_coros:
-                    final_result = Error(_non_awaited_error(unawaited_coros))
-                else:
-                    final_result = Value(stop_iteration.value)
+                final_result = Value(stop_iteration.value)
+                _stop_it = stop_iteration
             except BaseException as task_exc:
                 final_result = Error(task_exc)
+            finally:
+                task.add_unawaited_coroutines(protector.check())
 
             if final_result is not None:
                 # We can't call this directly inside the except: blocks above,
                 # because then the exceptions end up attaching themselves to
                 # other exceptions as __context__ in unwanted ways.
-                runner.task_exited(task, final_result)
+                runner.task_exited(task, final_result, _stop_it)
             else:
                 task._schedule_points += 1
                 yield_fn, *args = msg
@@ -1378,9 +1406,9 @@ def run_impl(runner, async_fn, args):
                     runner.reschedule(task)
                 else:
                     assert yield_fn is yield_indefinitely
+                    task._attempt_delivery_of_any_pending_cancel()
                     task._cancel_points += 1
                     task._abort_func, = args
-                    task._attempt_delivery_of_any_pending_cancel()
                     if runner.ki_pending and task is runner.main_task:
                         task._attempt_delivery_of_pending_ki()
 
