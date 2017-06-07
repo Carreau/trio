@@ -48,7 +48,7 @@ else
     cd empty
 
     INSTALLDIR=$(python -c "import os, trio; print(os.path.dirname(trio.__file__))")
-    pytest -ra --run-slow ${INSTALLDIR} --cov="$INSTALLDIR" --cov-config=../.coveragerc
+    pytest -ra ${INSTALLDIR} --cov="$INSTALLDIR" --cov-config=../.coveragerc --duration=10
 
     coverage combine
     pip install codecov && codecov
